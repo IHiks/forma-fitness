@@ -109,6 +109,10 @@ export function parseBinaryPlist(buf) {
   const offsetIntSize = trailer[6];
   const objectRefSize = trailer[7];
   const numObjects = Number(trailer.readBigUInt64BE(8));
+  // Индекс корневого объекта хранится в trailer (байты 16..23) и НЕ обязан
+  // быть 0: у реального Info.plist от Xcode 27 корень лежит по другому
+  // индексу (регресс с первой облачной сборки 20.10.2026).
+  const topObject = Number(trailer.readBigUInt64BE(16));
   const offsetTableOffset = Number(trailer.readBigUInt64BE(24));
 
   const offsets = [];
@@ -118,6 +122,15 @@ export function parseBinaryPlist(buf) {
 
   /** @type {Record<string, string | number>} */
   const result = {};
+
+  // Расширенная длина (info == 0xf): после маркера идёт int-маркер (0x1X)
+  // и сами байты длины. Возвращает [длина, размер префикса int-маркера+длины].
+  function readPlistLength(markerOff) {
+    const intMarker = buf[markerOff];
+    if (intMarker >> 4 !== 0x1) throw new Error('Повреждённый int-маркер длины в plist');
+    const size = 1 << (intMarker & 0x0f);
+    return [readPlistInt(buf, markerOff + 1, size), 1 + size];
+  }
 
   /** @returns {string | number | null} */
   function parseObject(idx, depth) {
@@ -130,23 +143,49 @@ export function parseBinaryPlist(buf) {
     if (type === 0x0) return info === 0x08 ? 1 : info === 0x09 ? 0 : null; // bool / null
     if (type === 0x1) return readPlistInt(buf, off + 1, 1 << info); // int
     if (type === 0x2) return null; // real (not needed)
-    if (type === 0x5) return buf.toString('utf8', off + 1, off + 1 + info); // ascii string
+    if (type === 0x5) {
+      // ascii string; длинные строки (например, 'CFBundleIdentifier') идут
+      // через расширенную длину 0x5f — именно в этом формате реальные
+      // Info.plist от Xcode хранят свои ключи.
+      if (info === 0xf) {
+        const [len, hs] = readPlistLength(off + 1);
+        return buf.toString('utf8', off + 1 + hs, off + 1 + hs + len);
+      }
+      return buf.toString('utf8', off + 1, off + 1 + info);
+    }
     if (type === 0x6) {
-      // utf16 string: length in info units
-      return buf.toString('utf16le', off + 2, off + 2 + info * 2);
+      // utf16 string: length in code units
+      if (info === 0xf) {
+        const [len, hs] = readPlistLength(off + 1);
+        return buf.toString('utf16le', off + 1 + hs, off + 1 + hs + len * 2);
+      }
+      return buf.toString('utf16le', off + 1, off + 1 + info * 2);
     }
     if (type === 0xa || type === 0xc) {
-      const count = info === 0xf ? readPlistInt(buf, off + 1, 1) : info;
+      let count = info;
+      let headerSize = 1;
+      if (info === 0xf) {
+        const [c, hs] = readPlistLength(off + 1);
+        count = c;
+        headerSize = 1 + hs;
+      }
+      const base = off + headerSize;
       const items = [];
       for (let i = 0; i < count; i += 1) {
-        items.push(parseObject(readPlistInt(buf, off + (info === 0xf ? 2 : 1) + i * objectRefSize, objectRefSize), depth + 1));
+        items.push(parseObject(readPlistInt(buf, base + i * objectRefSize, objectRefSize), depth + 1));
       }
       return items.join(', ');
     }
     if (type === 0xd) {
       // dict: only read scalar values; keys are always strings in Info.plist
-      const count = info === 0xf ? readPlistInt(buf, off + 1, 1) : info;
-      const base = off + (info === 0xf ? 2 : 1);
+      let count = info;
+      let headerSize = 1;
+      if (info === 0xf) {
+        const [c, hs] = readPlistLength(off + 1);
+        count = c;
+        headerSize = 1 + hs;
+      }
+      const base = off + headerSize;
       const keys = [];
       for (let i = 0; i < count; i += 1) {
         keys.push(parseObject(readPlistInt(buf, base + i * objectRefSize, objectRefSize), depth + 1));
@@ -162,7 +201,13 @@ export function parseBinaryPlist(buf) {
     return null;
   }
 
-  parseObject(0, 0);
+  parseObject(topObject < numObjects ? topObject : 0, 0);
+  // Fallback: если topObject оказался не той словарной структурой, обходим
+  // все объекты — встретившийся dict заполнит result (ключи Info.plist —
+  // верхнеуровневые скалярные значения).
+  if (result.CFBundleIdentifier === undefined && result.CFBundleExecutable === undefined) {
+    for (let i = 0; i < numObjects; i += 1) parseObject(i, 0);
+  }
   return result;
 }
 

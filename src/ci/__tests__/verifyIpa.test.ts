@@ -91,13 +91,78 @@ function fillerFiles(n: number): { name: string; data: Buffer }[] {
   }));
 }
 
+// Реальные Info.plist от Xcode — бинарные, причём корневой dict НЕ у объекта #0
+// (индекс корня хранится в trailer). Регресс первой облачной сборки 20.10.2026:
+// старый парсер брал объект #0 за корень и не находил ключей.
+function binaryPlistWithRootNotAtZero(): Buffer {
+  const strings = [
+    'decoy', // #0 — обычная строка, не dict
+    'CFBundleExecutable', // #1
+    'Forma', // #2
+    'CFBundleIdentifier', // #3
+    BUNDLE_ID, // #4
+    'CFBundleShortVersionString', // #5
+    '1.0.0', // #6
+    'MinimumOSVersion', // #7
+    '16.4', // #8
+  ];
+  const objects: Buffer[] = strings.map((s) => {
+    const body = Buffer.from(s, 'utf8');
+    // Расширенная длина — это int-объект: маркер 0x10 + значение длины.
+    return Buffer.concat([
+      Buffer.from([body.length < 15 ? 0x50 | body.length : 0x5f]),
+      ...(body.length < 15 ? [] : [Buffer.from([0x10, body.length])]),
+      body,
+    ]);
+  });
+  // #9 — корневой dict: сначала 4 ссылки на ключи, затем 4 на значения.
+  const dict = Buffer.alloc(1 + 8);
+  dict[0] = 0xd4;
+  [1, 3, 5, 7, 2, 4, 6, 8].forEach((ref, i) => {
+    dict[1 + i] = ref;
+  });
+  objects.push(dict);
+
+  const header = Buffer.from('bplist00', 'ascii');
+  const parts: Buffer[] = [header];
+  const offsets: number[] = [];
+  let cursor = header.length;
+  for (const obj of objects) {
+    offsets.push(cursor);
+    parts.push(obj);
+    cursor += obj.length;
+  }
+
+  const offsetTable = Buffer.concat(
+    offsets.map((o) => {
+      const b = Buffer.alloc(1);
+      b[0] = o;
+      return b;
+    })
+  );
+  const trailer = Buffer.alloc(32);
+  trailer[6] = 1; // offsetIntSize
+  trailer[7] = 1; // objectRefSize
+  trailer.writeBigUInt64BE(BigInt(objects.length), 8); // numObjects
+  trailer.writeBigUInt64BE(BigInt(objects.length - 1), 16); // topObject = dict (НЕ 0)
+  // offsetTableOffset = первый байт после последнего объекта:
+  const lastOffset = offsets[offsets.length - 1] ?? 0;
+  const lastObjLen = objects[objects.length - 1]?.length ?? 0;
+  trailer.writeBigUInt64BE(BigInt(lastOffset + lastObjLen), 24);
+  return Buffer.concat([...parts, offsetTable, trailer]);
+}
+
 function goodIpa(overrides: {
-  plist?: string;
+  plist?: string | Buffer;
   bundle?: Buffer | null;
   withProvision?: boolean;
 } = {}): Buffer {
+  const plistData = overrides.plist ?? XML_PLIST;
   const files = [
-    { name: 'Payload/Forma.app/Info.plist', data: Buffer.from(overrides.plist ?? XML_PLIST, 'utf8') },
+    {
+      name: 'Payload/Forma.app/Info.plist',
+      data: Buffer.isBuffer(plistData) ? plistData : Buffer.from(plistData, 'utf8'),
+    },
     { name: 'Payload/Forma.app/Forma', data: machOArm64() },
     ...(overrides.bundle === null
       ? []
@@ -134,6 +199,12 @@ afterAll(() => rmSync(workDir, { recursive: true, force: true }));
 describe('verify-ipa.mjs', () => {
   it('accepts a well-formed unsigned IPA', () => {
     const result = runIpa(goodIpa());
+    expect(result.status).toBe(0);
+    expect(result.output).toContain('OK');
+  });
+
+  it('accepts a binary Info.plist whose root object is not #0 (real Xcode layout)', () => {
+    const result = runIpa(goodIpa({ plist: binaryPlistWithRootNotAtZero() }));
     expect(result.status).toBe(0);
     expect(result.output).toContain('OK');
   });
