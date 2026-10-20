@@ -1,14 +1,46 @@
-# Статус проекта «Форма» — 20.10.2026 (подготовка к первой облачной сборке)
+# Статус проекта «Форма» — 20.10.2026 (первая облачная сборка успешна)
+
+## Главное
+
+- Публичный репозиторий: **https://github.com/IHiks/forma-fitness** (ветка `main`).
+- Первая облачная сборка **успешна**: run
+  https://github.com/IHiks/forma-fitness/actions/runs/39410967330 —
+  job «Unsigned IPA (Xcode 27)» ✓ за 14m31s (runner `xcode-27`, Xcode 27.0).
+- Артефакт: Release **v1.0.0-unsigned**
+  (https://github.com/IHiks/forma-fitness/releases/tag/v1.0.0-unsigned):
+  `Forma.ipa` (11 637 589 байт, sha256
+  `280a8e26da147b3ddbfae7767d0bfb106e8a195ed25816d922c5a7aeed3d7f59`) +
+  `source.json` (для SideStore; UTF-8, без `marketplaceID`/`build`).
+- IPA проверен локально `scripts/verify-ipa.mjs`: Payload/Forma.app, arm64
+  Mach-O, Hermes-бандл, bundle id `com.ihiks.forma`, версия 1.0.0,
+  MinimumOSVersion 16.4, профиль подписи отсутствует; sha256 совпадает с
+  `source.json` релиза.
+- Установка на iPhone — по `docs/INSTALL.md` (SideStore: LocalDevVPN +
+  iloader → переподпись Personal Team).
+
+## Как прошла сборка и что было исправлено
+
+1. Первая попытка (run 39408565522) упала НЕ из-за Xcode: архив собрался
+   (`Archive Succeeded`), но `verify-ipa.mjs` отклонил Info.plist — его
+   бинарный парсер не умел (а) корневой объект не на индексе 0 (поле
+   `topObject` в trailer), (б) строки/словари с расширенной длиной (0x5f),
+   в которых у реального Info.plist от Xcode 27 лежат длинные ключи
+   (`CFBundleIdentifier` = 18 символов). Синтетические тесты использовали
+   XML-plist и этот путь не покрывали.
+2. Исправлено в коммите `a3cea74`: чтение `topObject`, fallback-обход всех
+   объектов, поддержка расширенных длин (строки/массивы/словари), исправлен
+   сдвиг данных UTF-16; добавлен регрессионный тест с бинарным plist
+   (корень ≠ 0, длинные ключи). Тестов стало 106 — все зелёные.
+3. Вторая попытка (run 39410967330) — успех с первой ошибки.
 
 ## Где мы сейчас
 
-Приложение **написано полностью**; все локальные проверки зелёные (перезапущены
-20.10.2026 при подготовке к первой облачной сборке):
+Приложение **написано полностью**; локальные проверки зелёные:
 
 ```
 npm run typecheck   # ✅ 0 ошибок
 npm run lint        # ✅ 0 ошибок, 0 предупреждений
-npx jest            # ✅ 8 suites, 105 тестов
+npx jest            # ✅ 8 suites, 106 тестов
 npx expo export --platform ios   # ✅ Hermes-бандл 6.6 МБ в dist/
 ```
 
