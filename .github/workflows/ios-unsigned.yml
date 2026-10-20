@@ -1,0 +1,145 @@
+# Builds an unsigned Forma.ipa on a standard GitHub macOS runner and publishes
+# it as a GitHub Release (SideStore re-signs the IPA locally with your own
+# Personal Team certificate — no Apple Developer Program needed).
+#
+# Requires: a PUBLIC repository (free runner minutes) and Actions enabled.
+# Start it manually: Actions → "Build unsigned iOS IPA" → Run workflow.
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: 'Версия приложения (должна совпадать с app.json)'
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'src/**'
+      - 'assets/**'
+      - 'app.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'scripts/**'
+      - '.github/workflows/ios-unsigned.yml'
+
+# One build at a time; old in-progress runs are cancelled.
+concurrency:
+  group: ios-unsigned-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write # create releases and upload assets
+
+jobs:
+  build:
+    name: Unsigned IPA (Xcode ${{ matrix.xcode }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # xcode-27: macOS 27 + Xcode 27.0 (iOS 27 SDK) — fits Expo SDK 58
+        # (requires Xcode 26.4+). If GitHub demotes the image, switch to the
+        # documented fallback: runner macos-26 / xcode 26.6.
+        include:
+          - runner: xcode-27
+            xcode: '27'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          major="${{ matrix.xcode }}"
+          candidates=$(ls /Applications | grep -E "^Xcode_.*\.app$" | sort -V || true)
+          echo "Доступные Xcode: $candidates"
+          pick=$(echo "$candidates" | grep -E "^Xcode_${major}(\.|_)" | tail -1 || true)
+          if [ -z "$pick" ]; then
+            echo "Xcode $major не найден; используем системный по умолчанию"
+            xcodebuild -version
+          else
+            sudo xcode-select -s "/Applications/$pick/Contents/Developer"
+            xcodebuild -version
+          fi
+          # Гарантия: нужен Xcode 26.4+ для SDK 58 (build-unsigned-ipa.sh тоже проверяет).
+          ver=$(xcodebuild -version | awk 'NR==1 {print $2}')
+          major="${ver%%.*}"
+          if [ "$major" -lt 26 ]; then
+            echo "::error::Xcode $ver слишком старый для Expo SDK 58 (нужен 26.4+). Смените runner/matrix."
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Cache CocoaPods
+        uses: actions/cache@v4
+        with:
+          path: |
+            ios/Pods
+            ~/Library/Caches/CocoaPods
+          key: pods-${{ runner.os }}-${{ hashFiles('ios/Podfile.lock', 'package-lock.json') }}
+          restore-keys: |
+            pods-${{ runner.os }}-
+
+      - name: Build unsigned IPA
+        run: bash scripts/build-unsigned-ipa.sh
+
+      - name: Read app version
+        id: meta
+        run: |
+          version="${{ inputs.app_version }}"
+          if [ -z "$version" ]; then
+            version=$(node -p "require('./app.json').expo.version")
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}-unsigned" >> "$GITHUB_OUTPUT"
+
+      - name: Generate source.json for SideStore
+        run: |
+          node scripts/verify-ipa.mjs build/Forma.ipa \
+            --write-source build/source.json \
+            --app-version "${{ steps.meta.outputs.version }}" \
+            --url "https://github.com/${{ github.repository }}/releases/latest/download/Forma.ipa"
+
+      - name: Summarize artifact
+        run: |
+          {
+            echo "## Forma ${{ steps.meta.outputs.version }} (unsigned)"
+            echo ""
+            echo '```'
+            ls -lh build/Forma.ipa build/source.json
+            shasum -a 256 build/Forma.ipa
+            echo '```'
+            echo "IPA будет опубликован в Release \`${{ steps.meta.outputs.tag }}\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload workflow artifact (3-day retention)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Forma-${{ steps.meta.outputs.version }}-unsigned
+          path: |
+            build/Forma.ipa
+            build/source.json
+          retention-days: 3
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.meta.outputs.tag }}"
+          title="Форма ${{ steps.meta.outputs.version }} (unsigned)"
+          notes="Сборка без подписи Apple. Установка: SideStore (через iloader) → этот Release → Forma.ipa, либо \`sidestore://install?url=https://github.com/${{ github.repository }}/releases/latest/download/Forma.ipa\`. Подписывается SideStore вашим Personal Team; Apple Developer Program не нужен."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" build/Forma.ipa build/source.json --clobber
+          else
+            gh release create "$tag" build/Forma.ipa build/source.json \
+              --title "$title" \
+              --notes "$notes"
+          fi

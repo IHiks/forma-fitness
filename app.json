@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "Forma",
+    "slug": "forma-fitness",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "forma",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "icon": "./assets/icon.png",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.ihiks.forma",
+      "buildNumber": "1",
+      "requireFullScreen": true,
+      "infoPlist": {
+        "CFBundleDisplayName": "Форма",
+        "CFBundleDevelopmentRegion": "ru",
+        "CFBundleLocalizations": ["ru"],
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "splash": {
+      "backgroundColor": "#0B0D0C",
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-sqlite",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 120,
+          "resizeMode": "contain",
+          "backgroundColor": "#0B0D0C",
+          "dark": {
+            "image": "./assets/splash-icon.png",
+            "backgroundColor": "#0B0D0C"
+          }
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
